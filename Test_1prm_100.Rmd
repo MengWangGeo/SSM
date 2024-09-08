@@ -1,0 +1,109 @@
+---
+title: Test_1prm_100"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+# 0. Load packages
+```{r}
+library(VGAM)
+library(tidyverse)
+# library(slider)
+library(foreach)
+library(doParallel)
+rm(list = ls())
+
+start.time = Sys.time() # record running time
+```
+
+# 1. Set parameters
+```{r}
+# test fixed size and scale [0.1, 2]
+prm = tibble(scale = 2,
+             size = 0.1)
+
+# Define directory names
+dir.create("./Outputs/Test_1prm/Test_1prm_Rdata", recursive = TRUE)
+dir.create("./Outputs/Test_1prm/Test_1prm_depth", recursive = TRUE)
+dir.create("./Outputs/Test_1prm/Test_1prm_time", recursive = TRUE)
+```
+
+# 2. Read data
+```{r}
+Data = read_rds("./ReadData/La04_0-10Ma.Rdata") %>% 
+  rename(time_yr = V1, ETP = V2) %>% 
+  head(2e6) # 2 Myr duration
+```
+
+# 3. Computation
+```{r}
+# Prepare parallel computing
+cores = detectCores(logical = FALSE)
+cl = makeCluster(cores)
+registerDoParallel(cl)
+
+for (k in 1:100) { # times of test
+      
+      output = Data %>% 
+        mutate(sed.m = 10e-5, # mean sedimentation rate of 10 cm/kyr
+               sed.rate.ds = runif(length(time_yr), 0, 1) + sed.m,
+               left = sed.rate.ds < 0.5, right = !left,
+               sed.rate = row_number(NA))
+      
+      # Set distribution of sedimentation rates
+      sed.rate.left = -rtruncpareto(sum(output$left), 1, prm$size*1000,  prm$scale)+1
+      sed.rate.right = rtruncpareto(sum(output$right), 1, prm$size*1000, prm$scale)-1
+      output$sed.rate[output$left] = sed.rate.left
+      output$sed.rate[output$right] = sed.rate.right
+    
+      output = output %>%
+        mutate(sed.rate = sed.rate/1000 + sed.m,
+               beds = round(cumsum(sed.rate), digits = 5),  #to create bed elevations from instantaneous sed rates
+               bed.start = c(0, beds[-length(beds)]),
+               bed.end = beds,
+               bed.min = row_number(NA))
+  
+      # Calculate bed elevation
+      output$bed.min = foreach(n = 1:length(output$bed.end)) %dopar% {
+        if(n == length(output$bed.end))
+          return(output$bed.end[n])
+        return(min(output$bed.end[n:length(output$bed.end)]))
+        }
+      
+      # Save outputs
+      output = output %>% 
+        mutate(is.erosion = if_else(bed.min <= bed.start, T, F),
+               is.preserved = !is.erosion) %>% 
+        select(-c(left, right, bed.min, beds, sed.rate.ds, is.erosion, sed.m)) # delete these columns
+      
+      name1 = paste0("./Outputs/Test_1prm/Test_1prm_Rdata/", "Test_1prm_Rdata_", k, ".rds")
+      name2 = paste0("./Outputs/Test_1prm/Test_1prm_depth/", "Test_1prm_depth_", k, ".csv")
+      name3 = paste0("./Outputs/Test_1prm/Test_1prm_time/", "Test_1prm_time_", k, ".csv")
+      
+      write_rds(output, name1)
+      
+      write.table(cbind(output$bed.end[output$is.preserved],
+                        output$ETP[output$is.preserved]), 
+                  name2, sep = ",",
+                  col.names = F, 
+                  row.names = F) # write depth domain
+      
+      write.table(cbind(output$time_yr[output$is.preserved],
+                        output$ETP[output$is.preserved]), 
+                  name3, sep = ",", 
+                  col.names = F, 
+                  row.names = F) # write time domain
+}
+
+# Close parallel computing
+stopImplicitCluster()
+stopCluster(cl)
+
+# Running time
+end.time = Sys.time()
+time.taken = round(end.time - start.time, 2)
+time.taken
+```
+
+
